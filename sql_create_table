@@ -1,0 +1,220 @@
+
+-- (same schema as before, trimmed here for brevity in this cell)
+CREATE SCHEMA IF NOT EXISTS ctg;
+CREATE TABLE IF NOT EXISTS ctg.trials_raw (
+  nct_id           text PRIMARY KEY,
+  source_json      jsonb NOT NULL,
+  ingested_at      timestamptz NOT NULL DEFAULT now(),
+  source_version   text,
+  file_name        text
+);
+CREATE TABLE IF NOT EXISTS ctg.studies (
+  nct_id                 text PRIMARY KEY,
+  org_study_id           text,
+  org_full_name          text,
+  org_class              text,
+  brief_title            text,
+  official_title         text,
+  study_type             text,
+  phase                  text[],
+  enrollment_count       int,
+  enrollment_type        text,
+  start_date             date,
+  primary_completion_date date,
+  completion_date        date,
+  brief_summary          text,
+  detailed_description   text
+);
+CREATE TABLE IF NOT EXISTS ctg.study_status (
+  nct_id                 text PRIMARY KEY REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  overall_status         text,
+  status_verified_month  text,
+  results_first_posted   date,
+  last_update_posted     date
+);
+DO $$ BEGIN
+  CREATE TYPE ctg.group_module AS ENUM ('participant_flow','baseline','outcome','adverse_event');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TABLE IF NOT EXISTS ctg.groups (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  module                 ctg.group_module,
+  group_id               text,
+  title                  text,
+  description            text,
+  PRIMARY KEY (nct_id, module, group_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.arms (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  arm_label              text,
+  arm_type               text,
+  arm_description        text,
+  PRIMARY KEY (nct_id, arm_label)
+);
+CREATE TABLE IF NOT EXISTS ctg.interventions (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  intervention_name      text,
+  intervention_type      text,
+  description            text,
+  other_names            text[],
+  PRIMARY KEY (nct_id, intervention_name)
+);
+CREATE TABLE IF NOT EXISTS ctg.arm_interventions (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  arm_label              text,
+  intervention_name      text,
+  PRIMARY KEY (nct_id, arm_label, intervention_name),
+  FOREIGN KEY (nct_id, arm_label) REFERENCES ctg.arms(nct_id, arm_label) ON DELETE CASCADE,
+  FOREIGN KEY (nct_id, intervention_name) REFERENCES ctg.interventions(nct_id, intervention_name) ON DELETE CASCADE
+);
+DO $$ BEGIN
+  CREATE TYPE ctg.outcome_type AS ENUM ('PRIMARY','SECONDARY','OTHER');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TABLE IF NOT EXISTS ctg.outcome_measures (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  outcome_id             bigserial,
+  outcome_type           ctg.outcome_type,
+  title                  text,
+  description            text,
+  population_desc        text,
+  reporting_status       text,
+  param_type             text,
+  dispersion_type        text,
+  unit_of_measure        text,
+  timeframe              text,
+  raw_json               jsonb,
+  PRIMARY KEY (nct_id, outcome_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.outcome_denoms (
+  nct_id                 text,
+  outcome_id             bigint,
+  group_id               text,
+  units                  text,
+  count_value            numeric,
+  PRIMARY KEY (nct_id, outcome_id, group_id, units),
+  FOREIGN KEY (nct_id, outcome_id) REFERENCES ctg.outcome_measures(nct_id, outcome_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS ctg.outcome_measurements (
+  nct_id                 text,
+  outcome_id             bigint,
+  group_id               text,
+  category_title         text,
+  value_numeric          numeric,
+  value_text             text,
+  lower_limit            numeric,
+  upper_limit            numeric,
+  comment                text,
+  PRIMARY KEY (nct_id, outcome_id, group_id, COALESCE(category_title,'~')),
+  FOREIGN KEY (nct_id, outcome_id) REFERENCES ctg.outcome_measures(nct_id, outcome_id) ON DELETE CASCADE
+);
+DO $$ BEGIN
+  CREATE TYPE ctg.milestone_type AS ENUM ('STARTED','COMPLETED','NOT COMPLETED');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TABLE IF NOT EXISTS ctg.participant_flow_periods (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  period_title           text,
+  PRIMARY KEY (nct_id, period_title)
+);
+CREATE TABLE IF NOT EXISTS ctg.participant_flow_milestones (
+  nct_id                 text,
+  period_title           text,
+  milestone_type         ctg.milestone_type,
+  group_id               text,
+  num_subjects           numeric,
+  PRIMARY KEY (nct_id, period_title, milestone_type, group_id),
+  FOREIGN KEY (nct_id, period_title) REFERENCES ctg.participant_flow_periods(nct_id, period_title) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS ctg.participant_flow_withdrawals (
+  nct_id                 text,
+  period_title           text,
+  reason_type            text,
+  group_id               text,
+  num_subjects           numeric,
+  PRIMARY KEY (nct_id, period_title, reason_type, group_id),
+  FOREIGN KEY (nct_id, period_title) REFERENCES ctg.participant_flow_periods(nct_id, period_title) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS ctg.baseline_denoms (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  units                  text,
+  group_id               text,
+  value_count            numeric,
+  PRIMARY KEY (nct_id, units, group_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.baseline_measures (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  baseline_id            bigserial,
+  title                  text,
+  param_type             text,
+  dispersion_type        text,
+  unit_of_measure        text,
+  raw_json               jsonb,
+  PRIMARY KEY (nct_id, baseline_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.baseline_measure_values (
+  nct_id                 text,
+  baseline_id            bigint,
+  group_id               text,
+  category_title         text,
+  value_numeric          numeric,
+  lower_limit            numeric,
+  upper_limit            numeric,
+  PRIMARY KEY (nct_id, baseline_id, group_id, COALESCE(category_title,'~')),
+  FOREIGN KEY (nct_id, baseline_id) REFERENCES ctg.baseline_measures(nct_id, baseline_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS ctg.ae_event_groups (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  group_id               text,
+  title                  text,
+  description            text,
+  deaths_num_affected    numeric,
+  deaths_num_at_risk     numeric,
+  serious_num_affected   numeric,
+  serious_num_at_risk    numeric,
+  other_num_affected     numeric,
+  other_num_at_risk      numeric,
+  PRIMARY KEY (nct_id, group_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.adverse_events (
+  nct_id                 text REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  term                   text,
+  organ_system           text,
+  source_vocabulary      text,
+  assessment_type        text,
+  is_serious             boolean,
+  group_id               text,
+  num_affected           numeric,
+  num_at_risk            numeric,
+  PRIMARY KEY (nct_id, term, is_serious, group_id)
+);
+CREATE TABLE IF NOT EXISTS ctg.ipd_sharing (
+  nct_id                 text PRIMARY KEY REFERENCES ctg.studies(nct_id) ON DELETE CASCADE,
+  ipd_sharing            text,
+  description            text,
+  info_types             text[],
+  timeframe              text,
+  access_criteria        text
+);
+CREATE OR REPLACE VIEW ctg.v_outcome_distribution AS
+SELECT
+  m.nct_id,
+  s.brief_title,
+  m.outcome_id,
+  m.outcome_type,
+  m.title AS outcome_title,
+  m.param_type,
+  m.unit_of_measure,
+  m.timeframe,
+  g.group_id,
+  g.title         AS group_title,
+  om.value_numeric,
+  om.value_text,
+  om.lower_limit,
+  om.upper_limit,
+  d.count_value   AS denom_participants
+FROM ctg.outcome_measures m
+JOIN ctg.outcome_measurements om
+  ON om.nct_id = m.nct_id AND om.outcome_id = m.outcome_id
+LEFT JOIN ctg.outcome_denoms d
+  ON d.nct_id = m.nct_id AND d.outcome_id = m.outcome_id AND d.group_id = om.group_id
+LEFT JOIN ctg.groups g
+  ON g.nct_id = m.nct_id AND g.module = 'outcome'::ctg.group_module AND g.group_id = om.group_id
+JOIN ctg.studies s ON s.nct_id = m.nct_id;
